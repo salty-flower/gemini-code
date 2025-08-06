@@ -1,19 +1,19 @@
-from fastapi import FastAPI, Request, HTTPException
-import uvicorn
-import logging
-import json
-import re
 import asyncio
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional, Union, Literal, Set
+import json
+import logging
 import os
-from fastapi.responses import JSONResponse, StreamingResponse
-import litellm
-import uuid
-import time
-from dotenv import load_dotenv
-from datetime import datetime
 import sys
+import time
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional, Union
+
+import litellm
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 # Load environment variables early
 load_dotenv()
@@ -23,25 +23,26 @@ litellm.drop_params = True
 litellm.set_verbose = False
 litellm.request_timeout = 90
 
-# Constants for better maintainability  
+
+# Constants for better maintainability
 class Constants:
     ROLE_USER = "user"
     ROLE_ASSISTANT = "assistant"
     ROLE_SYSTEM = "system"
     ROLE_TOOL = "tool"
-    
+
     CONTENT_TEXT = "text"
     CONTENT_IMAGE = "image"
     CONTENT_TOOL_USE = "tool_use"
     CONTENT_TOOL_RESULT = "tool_result"
-    
+
     TOOL_FUNCTION = "function"
-    
+
     STOP_END_TURN = "end_turn"
     STOP_MAX_TOKENS = "max_tokens"
     STOP_TOOL_USE = "tool_use"
     STOP_ERROR = "error"
-    
+
     EVENT_MESSAGE_START = "message_start"
     EVENT_MESSAGE_STOP = "message_stop"
     EVENT_MESSAGE_DELTA = "message_delta"
@@ -49,9 +50,10 @@ class Constants:
     EVENT_CONTENT_BLOCK_STOP = "content_block_stop"
     EVENT_CONTENT_BLOCK_DELTA = "content_block_delta"
     EVENT_PING = "ping"
-    
+
     DELTA_TEXT = "text_delta"
     DELTA_INPUT_JSON = "input_json_delta"
+
 
 # Simple Configuration
 class Config:
@@ -59,35 +61,38 @@ class Config:
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY")
         if not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables")
-        
+
         self.big_model = os.environ.get("BIG_MODEL", "gemini-1.5-pro-latest")
         self.small_model = os.environ.get("SMALL_MODEL", "gemini-1.5-flash-latest")
         self.host = os.environ.get("HOST", "0.0.0.0")
         self.port = int(os.environ.get("PORT", "8082"))
         self.log_level = os.environ.get("LOG_LEVEL", "WARNING")
         self.max_tokens_limit = int(os.environ.get("MAX_TOKENS_LIMIT", "8192"))
-        
+
         # Connection settings - conservative defaults
         self.request_timeout = int(os.environ.get("REQUEST_TIMEOUT", "90"))
         self.max_retries = int(os.environ.get("MAX_RETRIES", "2"))
-        
+
         # Streaming settings
         self.max_streaming_retries = int(os.environ.get("MAX_STREAMING_RETRIES", "12"))
         self.force_disable_streaming = os.environ.get("FORCE_DISABLE_STREAMING", "false").lower() == "true"
         self.emergency_disable_streaming = os.environ.get("EMERGENCY_DISABLE_STREAMING", "false").lower() == "true"
-        
+
     def validate_api_key(self):
         """Basic API key validation"""
         if not self.gemini_api_key:
             return False
         # Basic format check for Google API keys
-        if not (self.gemini_api_key.startswith('AIza') and len(self.gemini_api_key) == 39):
+        if not (self.gemini_api_key.startswith("AIza") and len(self.gemini_api_key) == 39):
             return False
         return True
 
+
 try:
     config = Config()
-    print(f"✅ Configuration loaded: API_KEY={'*' * 20}..., BIG_MODEL='{config.big_model}', SMALL_MODEL='{config.small_model}'")
+    print(
+        f"✅ Configuration loaded: API_KEY={'*' * 20}..., BIG_MODEL='{config.big_model}', SMALL_MODEL='{config.small_model}'"
+    )
 except Exception as e:
     print(f"🔴 Configuration Error: {e}")
     sys.exit(1)
@@ -96,6 +101,7 @@ except Exception as e:
 litellm.request_timeout = config.request_timeout
 litellm.num_retries = config.max_retries
 
+
 # Model Management
 class ModelManager:
     def __init__(self, config):
@@ -103,78 +109,77 @@ class ModelManager:
         self.base_gemini_models = [
             "gemini-1.5-pro-latest",
             "gemini-1.5-pro-preview-0514",
-            "gemini-1.5-flash-latest", 
+            "gemini-1.5-flash-latest",
             "gemini-1.5-flash-preview-0514",
             "gemini-pro",
             "gemini-2.5-pro-preview-05-06",
             "gemini-2.5-flash-preview-04-17",
             "gemini-2.0-flash-exp",
-            "gemini-exp-1206"
+            "gemini-exp-1206",
         ]
         self._gemini_models = set(self.base_gemini_models)
         self._add_env_models()
-    
+
     def _add_env_models(self):
         for model in [self.config.big_model, self.config.small_model]:
             if model.startswith("gemini") and model not in self._gemini_models:
                 self._gemini_models.add(model)
-    
+
     @property
     def gemini_models(self) -> List[str]:
-        return sorted(list(self._gemini_models))
-    
+        return sorted(self._gemini_models)
+
     def validate_and_map_model(self, original_model: str) -> tuple[str, bool]:
         clean_model = self._clean_model_name(original_model)
         mapped_model = self._map_model_alias(clean_model)
-        
+
         if mapped_model != clean_model:
             return f"gemini/{mapped_model}", True
         elif clean_model in self._gemini_models:
             return f"gemini/{clean_model}", True
-        elif not original_model.startswith('gemini/'):
+        elif not original_model.startswith("gemini/"):
             return f"gemini/{original_model}", False
         else:
             return original_model, False
-    
+
     def _clean_model_name(self, model: str) -> str:
-        if model.startswith('gemini/'):
+        if model.startswith("gemini/"):
             return model[7:]
-        elif model.startswith('anthropic/'):
+        elif model.startswith("anthropic/"):
             return model[10:]
-        elif model.startswith('openai/'):
+        elif model.startswith("openai/"):
             return model[7:]
         return model
-    
+
     def _map_model_alias(self, clean_model: str) -> str:
         model_lower = clean_model.lower()
-        
-        if 'haiku' in model_lower:
+
+        if "haiku" in model_lower:
             return self.config.small_model
-        elif 'sonnet' in model_lower or 'opus' in model_lower:
+        elif "sonnet" in model_lower or "opus" in model_lower:
             return self.config.big_model
-        
+
         return clean_model
+
 
 model_manager = ModelManager(config)
 
 # Logging Configuration
 logging.basicConfig(
     level=getattr(logging, config.log_level.upper()),
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
 
 # Simple message filter
 class SimpleMessageFilter(logging.Filter):
     def filter(self, record):
-        blocked_phrases = [
-            "LiteLLM completion()",
-            "HTTP Request:",
-            "cost_calculator"
-        ]
-        if hasattr(record, 'msg') and isinstance(record.msg, str):
+        blocked_phrases = ["LiteLLM completion()", "HTTP Request:", "cost_calculator"]
+        if hasattr(record, "msg") and isinstance(record.msg, str):
             return not any(phrase in record.msg for phrase in blocked_phrases)
         return True
+
 
 root_logger = logging.getLogger()
 root_logger.addFilter(SimpleMessageFilter())
@@ -185,48 +190,52 @@ for uvicorn_logger in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
 
 app = FastAPI(title="Gemini-to-Claude API Proxy", version="2.5.0")
 
+
 # Enhanced error classification
 def classify_gemini_error(error_msg: str) -> str:
     """Provide specific error guidance for common Gemini issues."""
     error_lower = error_msg.lower()
-    
+
     # Streaming/parsing errors
     if "error parsing chunk" in error_lower and "expecting property name" in error_lower:
         return "Gemini streaming parsing error (malformed JSON chunk). This is a known intermittent Gemini API issue. Please try again or disable streaming by setting stream=false."
-    
+
     # Tool schema validation errors
     if "function_declarations" in error_lower and "format" in error_lower:
         if "only 'enum' and 'date-time' are supported" in error_lower:
             return "Tool schema error: Gemini only supports 'enum' and 'date-time' formats for string parameters. Remove other format types like 'url', 'email', 'uri', etc."
         else:
             return "Tool schema validation error. Check your tool parameter definitions for unsupported format types or properties."
-    
+
     # Rate limiting
     elif "rate limit" in error_lower or "quota" in error_lower:
         return "Rate limit or quota exceeded. Please wait a moment and try again. Check your Google Cloud Console for quota limits."
-    
+
     # Authentication issues
     elif "api key" in error_lower or "authentication" in error_lower or "unauthorized" in error_lower:
         return "API key error. Please check that your GEMINI_API_KEY is valid and has the necessary permissions."
-    
+
     # Parsing/streaming issues
     elif "parsing" in error_lower or "json" in error_lower or "malformed" in error_lower:
         return "Response parsing error. This is often a temporary Gemini API issue - please retry your request."
-    
+
     # Connection issues
     elif "connection" in error_lower or "timeout" in error_lower:
         return "Connection or timeout error. Please check your internet connection and try again."
-    
+
     # Safety/content filtering
     elif "safety" in error_lower or "content" in error_lower and "filter" in error_lower:
-        return "Content filtered by Gemini's safety systems. Please modify your request to comply with content policies."
-    
+        return (
+            "Content filtered by Gemini's safety systems. Please modify your request to comply with content policies."
+        )
+
     # Token/length issues
     elif "token" in error_lower and ("limit" in error_lower or "exceed" in error_lower):
         return "Token limit exceeded. Please reduce the length of your request or increase the max_tokens parameter."
-    
+
     # Default: return original message
     return error_msg
+
 
 # Enhanced schema cleaner
 def clean_gemini_schema(schema: Any) -> Any:
@@ -246,20 +255,28 @@ def clean_gemini_schema(schema: Any) -> Any:
         # Recursively clean nested schemas
         for key, value in list(schema.items()):
             schema[key] = clean_gemini_schema(value)
-                
+
     elif isinstance(schema, list):
         return [clean_gemini_schema(item) for item in schema]
-            
+
     return schema
 
+
 # Pydantic Models
+class ContentBlockThinking(BaseModel):
+    type: Literal["thinking"]
+    thinking: str
+
+
 class ContentBlockText(BaseModel):
     type: Literal["text"]
     text: str
 
+
 class ContentBlockImage(BaseModel):
     type: Literal["image"]
     source: Dict[str, Any]
+
 
 class ContentBlockToolUse(BaseModel):
     type: Literal["tool_use"]
@@ -267,26 +284,43 @@ class ContentBlockToolUse(BaseModel):
     name: str
     input: Dict[str, Any]
 
+
 class ContentBlockToolResult(BaseModel):
     type: Literal["tool_result"]
     tool_use_id: str
     content: Union[str, List[Dict[str, Any]], Dict[str, Any]]
 
+
 class SystemContent(BaseModel):
     type: Literal["text"]
     text: str
 
+
 class Message(BaseModel):
     role: Literal["user", "assistant"]
-    content: Union[str, List[Union[ContentBlockText, ContentBlockImage, ContentBlockToolUse, ContentBlockToolResult]]]
+    content: Union[
+        str,
+        List[
+            Union[
+                ContentBlockText,
+                ContentBlockImage,
+                ContentBlockToolUse,
+                ContentBlockToolResult,
+                ContentBlockThinking,
+            ]
+        ],
+    ]
+
 
 class Tool(BaseModel):
     name: str
     description: Optional[str] = None
     input_schema: Dict[str, Any]
 
+
 class ThinkingConfig(BaseModel):
     enabled: bool = True
+
 
 class MessagesRequest(BaseModel):
     model: str
@@ -304,21 +338,24 @@ class MessagesRequest(BaseModel):
     thinking: Optional[ThinkingConfig] = None
     original_model: Optional[str] = None
 
-    @field_validator('model')
+    @field_validator("model")
     @classmethod
     def validate_model_field(cls, v, info):
         original_model = v
         mapped_model, was_mapped = model_manager.validate_and_map_model(v)
-        
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Big='{config.big_model}', Small='{config.small_model}'")
-        
+
+        logger.debug(
+            f"📋 MODEL VALIDATION: Original='{original_model}', Big='{config.big_model}', Small='{config.small_model}'"
+        )
+
         if was_mapped:
             logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{mapped_model}'")
-        
-        if info and hasattr(info, 'data') and isinstance(info.data, dict):
-            info.data['original_model'] = original_model
-            
+
+        if info and hasattr(info, "data") and isinstance(info.data, dict):
+            info.data["original_model"] = original_model
+
         return mapped_model
+
 
 class TokenCountRequest(BaseModel):
     model: str
@@ -329,22 +366,25 @@ class TokenCountRequest(BaseModel):
     tool_choice: Optional[Dict[str, Any]] = None
     original_model: Optional[str] = None
 
-    @field_validator('model')
+    @field_validator("model")
     @classmethod
     def validate_model_token_count(cls, v, info):
         mapped_model, _ = model_manager.validate_and_map_model(v)
-        if info and hasattr(info, 'data') and isinstance(info.data, dict):
-            info.data['original_model'] = v
+        if info and hasattr(info, "data") and isinstance(info.data, dict):
+            info.data["original_model"] = v
         return mapped_model
+
 
 class TokenCountResponse(BaseModel):
     input_tokens: int
+
 
 class Usage(BaseModel):
     input_tokens: int
     output_tokens: int
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+
 
 class MessagesResponse(BaseModel):
     id: str
@@ -355,6 +395,7 @@ class MessagesResponse(BaseModel):
     stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "error"]] = None
     stop_sequence: Optional[str] = None
     usage: Usage
+
 
 # Tool result parsing
 def parse_tool_result_content(content):
@@ -395,11 +436,12 @@ def parse_tool_result_content(content):
     except:
         return "Unparseable content"
 
+
 # Enhanced message conversion
 def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str, Any]:
     """Convert Anthropic API request format to LiteLLM format for Gemini."""
     litellm_messages = []
-    
+
     # System message handling
     if anthropic_request.system:
         system_text = ""
@@ -408,12 +450,12 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         elif isinstance(anthropic_request.system, list):
             text_parts = []
             for block in anthropic_request.system:
-                if hasattr(block, 'type') and block.type == Constants.CONTENT_TEXT:
+                if hasattr(block, "type") and block.type == Constants.CONTENT_TEXT:
                     text_parts.append(block.text)
                 elif isinstance(block, dict) and block.get("type") == Constants.CONTENT_TEXT:
                     text_parts.append(block.get("text", ""))
             system_text = "\n\n".join(text_parts)
-        
+
         if system_text.strip():
             litellm_messages.append({"role": Constants.ROLE_SYSTEM, "content": system_text.strip()})
 
@@ -433,24 +475,29 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             if block.type == Constants.CONTENT_TEXT:
                 text_parts.append(block.text)
             elif block.type == Constants.CONTENT_IMAGE:
-                if (isinstance(block.source, dict) and 
-                    block.source.get("type") == "base64" and
-                    "media_type" in block.source and "data" in block.source):
-                    image_parts.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{block.source['media_type']};base64,{block.source['data']}"
+                if (
+                    isinstance(block.source, dict)
+                    and block.source.get("type") == "base64"
+                    and "media_type" in block.source
+                    and "data" in block.source
+                ):
+                    image_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{block.source['media_type']};base64,{block.source['data']}"},
                         }
-                    })
+                    )
             elif block.type == Constants.CONTENT_TOOL_USE and msg.role == Constants.ROLE_ASSISTANT:
-                tool_calls.append({
-                    "id": block.id,
-                    "type": Constants.TOOL_FUNCTION,
-                    Constants.TOOL_FUNCTION: {
-                        "name": block.name,
-                        "arguments": json.dumps(block.input)
+                tool_calls.append(
+                    {
+                        "id": block.id,
+                        "type": Constants.TOOL_FUNCTION,
+                        Constants.TOOL_FUNCTION: {
+                            "name": block.name,
+                            "arguments": json.dumps(block.input),
+                        },
                     }
-                })
+                )
             elif block.type == Constants.CONTENT_TOOL_RESULT and msg.role == Constants.ROLE_USER:
                 # CRITICAL: Split user message when tool_result is encountered
                 if text_parts or image_parts:
@@ -459,21 +506,27 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                     if text_content:
                         content_parts.append({"type": Constants.CONTENT_TEXT, "text": text_content})
                     content_parts.extend(image_parts)
-                    
-                    litellm_messages.append({
-                        "role": Constants.ROLE_USER,
-                        "content": content_parts[0]["text"] if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT else content_parts
-                    })
+
+                    litellm_messages.append(
+                        {
+                            "role": Constants.ROLE_USER,
+                            "content": content_parts[0]["text"]
+                            if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT
+                            else content_parts,
+                        }
+                    )
                     text_parts.clear()
                     image_parts.clear()
 
                 # Add tool result as separate "tool" role message
                 parsed_content = parse_tool_result_content(block.content)
-                pending_tool_messages.append({
-                    "role": Constants.ROLE_TOOL,
-                    "tool_call_id": block.tool_use_id,
-                    "content": parsed_content
-                })
+                pending_tool_messages.append(
+                    {
+                        "role": Constants.ROLE_TOOL,
+                        "tool_call_id": block.tool_use_id,
+                        "content": parsed_content,
+                    }
+                )
 
         # Finalize message based on role
         if msg.role == Constants.ROLE_USER:
@@ -484,33 +537,41 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                 if text_content:
                     content_parts.append({"type": Constants.CONTENT_TEXT, "text": text_content})
                 content_parts.extend(image_parts)
-                
-                litellm_messages.append({
-                    "role": Constants.ROLE_USER,
-                    "content": content_parts[0]["text"] if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT else content_parts
-                })
+
+                litellm_messages.append(
+                    {
+                        "role": Constants.ROLE_USER,
+                        "content": content_parts[0]["text"]
+                        if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT
+                        else content_parts,
+                    }
+                )
             # Add any pending tool messages
             litellm_messages.extend(pending_tool_messages)
-            
+
         elif msg.role == Constants.ROLE_ASSISTANT:
             assistant_msg = {"role": Constants.ROLE_ASSISTANT}
-            
+
             # Handle content for assistant messages
             content_parts = []
             text_content = "".join(text_parts).strip()
             if text_content:
                 content_parts.append({"type": Constants.CONTENT_TEXT, "text": text_content})
             content_parts.extend(image_parts)
-            
+
             # FIXED: Don't set content to None - let LiteLLM handle missing content
             if content_parts:
-                assistant_msg["content"] = content_parts[0]["text"] if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT else content_parts
-            else: 
+                assistant_msg["content"] = (
+                    content_parts[0]["text"]
+                    if len(content_parts) == 1 and content_parts[0]["type"] == Constants.CONTENT_TEXT
+                    else content_parts
+                )
+            else:
                 assistant_msg["content"] = None
-                
+
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
-                
+
             # Only add message if it has actual content or tool calls
             if assistant_msg.get("content") or assistant_msg.get("tool_calls"):
                 litellm_messages.append(assistant_msg)
@@ -538,14 +599,16 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         for tool in anthropic_request.tools:
             if tool.name and tool.name.strip():
                 cleaned_schema = clean_gemini_schema(tool.input_schema)
-                valid_tools.append({
-                    "type": Constants.TOOL_FUNCTION,
-                    Constants.TOOL_FUNCTION: {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": cleaned_schema
+                valid_tools.append(
+                    {
+                        "type": Constants.TOOL_FUNCTION,
+                        Constants.TOOL_FUNCTION: {
+                            "name": tool.name,
+                            "description": tool.description or "",
+                            "parameters": cleaned_schema,
+                        },
                     }
-                })
+                )
         if valid_tools:
             litellm_request["tools"] = valid_tools
 
@@ -558,8 +621,8 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             litellm_request["tool_choice"] = "auto"
         elif choice_type == "tool" and "name" in anthropic_request.tool_choice:
             litellm_request["tool_choice"] = {
-                "type": Constants.TOOL_FUNCTION, 
-                Constants.TOOL_FUNCTION: {"name": anthropic_request.tool_choice["name"]}
+                "type": Constants.TOOL_FUNCTION,
+                Constants.TOOL_FUNCTION: {"name": anthropic_request.tool_choice["name"]},
             }
         else:
             litellm_request["tool_choice"] = "auto"
@@ -572,12 +635,15 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             litellm_request["thinkingConfig"] = {"thinkingBudget": 0}
 
     # Add user metadata if provided
-    if (anthropic_request.metadata and 
-        "user_id" in anthropic_request.metadata and
-        isinstance(anthropic_request.metadata["user_id"], str)):
+    if (
+        anthropic_request.metadata
+        and "user_id" in anthropic_request.metadata
+        and isinstance(anthropic_request.metadata["user_id"], str)
+    ):
         litellm_request["user"] = anthropic_request.metadata["user_id"]
 
     return litellm_request
+
 
 # Response conversion
 def convert_litellm_to_anthropic(litellm_response, original_request: MessagesRequest) -> MessagesResponse:
@@ -592,19 +658,19 @@ def convert_litellm_to_anthropic(litellm_response, original_request: MessagesReq
         completion_tokens = 0
 
         # Handle LiteLLM ModelResponse object format
-        if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
+        if hasattr(litellm_response, "choices") and hasattr(litellm_response, "usage"):
             choices = litellm_response.choices
             message = choices[0].message if choices else None
-            content_text = getattr(message, 'content', "") or ""
-            tool_calls = getattr(message, 'tool_calls', None)
+            content_text = getattr(message, "content", "") or ""
+            tool_calls = getattr(message, "tool_calls", None)
             finish_reason = choices[0].finish_reason if choices else "stop"
-            response_id = getattr(litellm_response, 'id', response_id)
-            
-            if hasattr(litellm_response, 'usage'):
+            response_id = getattr(litellm_response, "id", response_id)
+
+            if hasattr(litellm_response, "usage"):
                 usage = litellm_response.usage
                 prompt_tokens = getattr(usage, "prompt_tokens", 0)
                 completion_tokens = getattr(usage, "completion_tokens", 0)
-                
+
         # Handle dictionary response format
         elif isinstance(litellm_response, dict):
             choices = litellm_response.get("choices", [])
@@ -619,7 +685,7 @@ def convert_litellm_to_anthropic(litellm_response, original_request: MessagesReq
 
         # Build content blocks
         content_blocks = []
-        
+
         # Add text content if present
         if content_text:
             content_blocks.append(ContentBlockText(type=Constants.CONTENT_TEXT, text=content_text))
@@ -653,12 +719,14 @@ def convert_litellm_to_anthropic(litellm_response, original_request: MessagesReq
                     except json.JSONDecodeError:
                         arguments_dict = {"raw_arguments": arguments_str}
 
-                    content_blocks.append(ContentBlockToolUse(
-                        type=Constants.CONTENT_TOOL_USE,
-                        id=tool_id,
-                        name=name,
-                        input=arguments_dict
-                    ))
+                    content_blocks.append(
+                        ContentBlockToolUse(
+                            type=Constants.CONTENT_TOOL_USE,
+                            id=tool_id,
+                            name=name,
+                            input=arguments_dict,
+                        )
+                    )
                 except Exception as e:
                     logger.warning(f"Error processing tool call: {e}")
                     continue
@@ -684,33 +752,31 @@ def convert_litellm_to_anthropic(litellm_response, original_request: MessagesReq
             content=content_blocks,
             stop_reason=stop_reason,
             stop_sequence=None,
-            usage=Usage(
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens
-            )
+            usage=Usage(input_tokens=prompt_tokens, output_tokens=completion_tokens),
         )
-        
+
     except Exception as e:
         logger.error(f"Error converting response: {e}")
         return MessagesResponse(
             id=f"msg_error_{uuid.uuid4()}",
             model=original_request.original_model or original_request.model,
-            role=Constants.ROLE_ASSISTANT, 
+            role=Constants.ROLE_ASSISTANT,
             content=[ContentBlockText(type=Constants.CONTENT_TEXT, text="Response conversion error")],
             stop_reason=Constants.STOP_ERROR,
-            usage=Usage(input_tokens=0, output_tokens=0)
+            usage=Usage(input_tokens=0, output_tokens=0),
         )
+
 
 # Enhanced streaming handler with more robust error recovery
 async def handle_streaming_with_recovery(response_generator, original_request: MessagesRequest, input_tokens: int):
     """Enhanced streaming handler with robust error recovery for malformed chunks."""
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
-    
+
     # Send initial SSE events
     yield f"event: {Constants.EVENT_MESSAGE_START}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_START, 'message': {'id': message_id, 'type': 'message', 'role': Constants.ROLE_ASSISTANT, 'model': original_request.original_model or original_request.model, 'content': [], 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': input_tokens, 'output_tokens': 0}}})}\n\n"
-    
+
     yield f"event: {Constants.EVENT_CONTENT_BLOCK_START}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_START, 'index': 0, 'content_block': {'type': Constants.CONTENT_TEXT, 'text': ''}})}\n\n"
-    
+
     yield f"event: {Constants.EVENT_PING}\ndata: {json.dumps({'type': Constants.EVENT_PING})}\n\n"
 
     # Streaming state management
@@ -722,95 +788,107 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
     input_tokens = 0
     output_tokens = 0
     final_stop_reason = Constants.STOP_END_TURN
-    
+
     # Enhanced error recovery tracking
     consecutive_errors = 0
     max_consecutive_errors = 10  # Increased from 5
     stream_terminated_early = False
     malformed_chunks_count = 0
     max_malformed_chunks = 20  # Allow more malformed chunks before giving up
-    
+
     # Buffer for incomplete chunks
     chunk_buffer = ""
-    
+
     def is_malformed_chunk(chunk_str: str) -> bool:
         """Enhanced malformed chunk detection."""
         if not chunk_str or not isinstance(chunk_str, str):
             return True
-            
+
         chunk_stripped = chunk_str.strip()
-        
+
         # Empty or whitespace
         if not chunk_stripped:
             return True
-            
+
         # Single characters that indicate malformed JSON
         malformed_singles = ["{", "}", "[", "]", ",", ":", '"', "'"]
         if chunk_stripped in malformed_singles:
             return True
-            
+
         # Common malformed patterns
         malformed_patterns = [
-            '{"', '"}', "[{", "}]", "{}", "[]", 
-            "null", '""', "''", " ", "",
-            "{,", ",}", "[,", ",]"
+            '{"',
+            '"}',
+            "[{",
+            "}]",
+            "{}",
+            "[]",
+            "null",
+            '""',
+            "''",
+            " ",
+            "",
+            "{,",
+            ",}",
+            "[,",
+            ",]",
         ]
         if chunk_stripped in malformed_patterns:
             return True
-            
+
         # Incomplete JSON structures
-        if chunk_stripped.startswith('{') and not chunk_stripped.endswith('}'):
+        if chunk_stripped.startswith("{") and not chunk_stripped.endswith("}"):
             if len(chunk_stripped) < 15:  # Very short incomplete JSON
                 return True
-                
-        if chunk_stripped.startswith('[') and not chunk_stripped.endswith(']'):
+
+        if chunk_stripped.startswith("[") and not chunk_stripped.endswith("]"):
             if len(chunk_stripped) < 10:
                 return True
-        
+
         # Check for obviously broken JSON patterns
-        if chunk_stripped.count('{') != chunk_stripped.count('}'):
+        if chunk_stripped.count("{") != chunk_stripped.count("}"):
             if len(chunk_stripped) < 20:  # Only for short chunks
                 return True
-                
-        if chunk_stripped.count('[') != chunk_stripped.count(']'):
+
+        if chunk_stripped.count("[") != chunk_stripped.count("]"):
             if len(chunk_stripped) < 20:
                 return True
-        
+
         return False
-    
+
     def try_parse_buffered_chunk(buffer: str) -> tuple[dict, str]:
         """Try to parse buffered chunks, return parsed chunk and remaining buffer."""
         if not buffer.strip():
             return None, ""
-            
+
         # Try to find complete JSON objects in the buffer
         brace_count = 0
         start_pos = -1
-        
+
         for i, char in enumerate(buffer):
-            if char == '{':
+            if char == "{":
                 if start_pos == -1:
                     start_pos = i
                 brace_count += 1
-            elif char == '}':
+            elif char == "}":
                 brace_count -= 1
                 if brace_count == 0 and start_pos != -1:
                     # Found complete JSON object
-                    json_str = buffer[start_pos:i+1]
+                    json_str = buffer[start_pos : i + 1]
                     try:
                         parsed = json.loads(json_str)
-                        remaining_buffer = buffer[i+1:]
+                        remaining_buffer = buffer[i + 1 :]
                         return parsed, remaining_buffer
                     except json.JSONDecodeError:
                         continue
-        
+
         # No complete JSON found
         return None, buffer
-    
+
     try:
         # Wrap the entire streaming process in comprehensive error handling
         stream_iterator = aiter(response_generator)
-        
+
         while True:
             try:
                 # Get next chunk with timeout
@@ -822,45 +900,47 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                     logger.warning("Streaming timeout, terminating")
                     stream_terminated_early = True
                     break
-                
+
                 # Reset consecutive error counter on successful chunk retrieval
                 consecutive_errors = 0
                 all_chunks.append(chunk)
-                
+
                 # Handle string chunks with enhanced validation
                 if isinstance(chunk, str):
                     if chunk.strip() == "[DONE]":
                         break
-                    
+
                     # Check for malformed chunks
                     if is_malformed_chunk(chunk):
                         malformed_chunks_count += 1
-                        logger.debug(f"Skipping malformed chunk #{malformed_chunks_count}: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
-                        
+                        logger.debug(
+                            f"Skipping malformed chunk #{malformed_chunks_count}: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'"
+                        )
+
                         if malformed_chunks_count > max_malformed_chunks:
                             logger.error(f"Too many malformed chunks ({malformed_chunks_count}), terminating stream")
                             stream_terminated_early = True
                             break
                         continue
-                    
+
                     # Add to buffer and try to parse
                     chunk_buffer += chunk
                     parsed_chunk, chunk_buffer = try_parse_buffered_chunk(chunk_buffer)
-                    
+
                     if parsed_chunk is None:
                         # Keep buffering if we don't have a complete chunk yet
                         if len(chunk_buffer) > 10000:  # Prevent buffer from growing too large
                             logger.warning("Chunk buffer too large, clearing")
                             chunk_buffer = ""
                         continue
-                    
+
                     chunk = parsed_chunk
-                
+
                 # If we have a dictionary at this point, process it
                 if isinstance(chunk, dict):
                     # Process the chunk normally (existing logic)
                     pass
-                elif hasattr(chunk, 'choices'):
+                elif hasattr(chunk, "choices"):
                     # Process ModelResponse object normally (existing logic)
                     pass
                 else:
@@ -880,14 +960,14 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                 delta_tool_calls = None
                 chunk_finish_reason = None
 
-                if hasattr(chunk, 'choices') and chunk.choices:
+                if hasattr(chunk, "choices") and chunk.choices:
                     choice = chunk.choices[0]
-                    if hasattr(choice, 'delta') and choice.delta:
+                    if hasattr(choice, "delta") and choice.delta:
                         delta = choice.delta
-                        delta_content_text = getattr(delta, 'content', None)
-                        if hasattr(delta, 'tool_calls'):
+                        delta_content_text = getattr(delta, "content", None)
+                        if hasattr(delta, "tool_calls"):
                             delta_tool_calls = delta.tool_calls
-                    chunk_finish_reason = getattr(choice, 'finish_reason', None)
+                    chunk_finish_reason = getattr(choice, "finish_reason", None)
                 elif isinstance(chunk, dict):
                     choices = chunk.get("choices", [])
                     if choices:
@@ -897,9 +977,9 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                         delta_tool_calls = delta.get("tool_calls")
                         chunk_finish_reason = choice.get("finish_reason")
 
-                if hasattr(chunk, 'usage') and chunk.usage:
-                    input_tokens = getattr(chunk.usage, 'prompt_tokens', 0)
-                    output_tokens = getattr(chunk.usage, 'completion_tokens', 0)
+                if hasattr(chunk, "usage") and chunk.usage:
+                    input_tokens = getattr(chunk.usage, "prompt_tokens", 0)
+                    output_tokens = getattr(chunk.usage, "completion_tokens", 0)
                 elif isinstance(chunk, dict) and "usage" in chunk:
                     usage = chunk["usage"]
                     input_tokens = usage.get("prompt_tokens", 0)
@@ -913,24 +993,28 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                 # Handle tool call deltas (your existing logic)
                 if delta_tool_calls:
                     for tc_chunk in delta_tool_calls:
-                        if not (hasattr(tc_chunk, 'function') and tc_chunk.function and 
-                               hasattr(tc_chunk.function, 'name') and tc_chunk.function.name):
+                        if not (
+                            hasattr(tc_chunk, "function")
+                            and tc_chunk.function
+                            and hasattr(tc_chunk.function, "name")
+                            and tc_chunk.function.name
+                        ):
                             continue
-                            
+
                         tool_call_id = tc_chunk.id
-                        
+
                         if tool_call_id not in current_tool_calls:
                             tool_block_counter += 1
                             tool_index = text_block_index + tool_block_counter
-                            
+
                             current_tool_calls[tool_call_id] = {
                                 "index": tool_index,
                                 "name": tc_chunk.function.name or "",
-                                "args_buffer": tc_chunk.function.arguments or ""
+                                "args_buffer": tc_chunk.function.arguments or "",
                             }
-                            
+
                             yield f"event: {Constants.EVENT_CONTENT_BLOCK_START}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_START, 'index': tool_index, 'content_block': {'type': Constants.CONTENT_TOOL_USE, 'id': tool_call_id, 'name': current_tool_calls[tool_call_id]['name'], 'input': {}}})}\n\n"
-                        
+
                         if tc_chunk.function.arguments:
                             current_tool_calls[tool_call_id]["args_buffer"] += tc_chunk.function.arguments
                             yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': current_tool_calls[tool_call_id]['index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tc_chunk.function.arguments}})}\n\n"
@@ -946,36 +1030,43 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                     else:
                         final_stop_reason = Constants.STOP_END_TURN
                     break
-                        
+
             except (json.JSONDecodeError, ValueError) as parse_error:
                 consecutive_errors += 1
-                logger.debug(f"JSON parsing error (attempt {consecutive_errors}/{max_consecutive_errors}): {parse_error}")
-                
+                logger.debug(
+                    f"JSON parsing error (attempt {consecutive_errors}/{max_consecutive_errors}): {parse_error}"
+                )
+
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(f"Too many consecutive parsing errors ({consecutive_errors}), terminating stream")
                     stream_terminated_early = True
                     break
                 continue
-                
+
             except (litellm.exceptions.APIConnectionError, RuntimeError) as api_error:
                 consecutive_errors += 1
                 error_msg = str(api_error)
-                
+
                 # Check for the specific malformed chunk error
-                if ("Error parsing chunk" in error_msg and 
-                    "Expecting property name enclosed in double quotes" in error_msg):
-                    
-                    logger.warning(f"Gemini malformed chunk error (attempt {consecutive_errors}/{max_consecutive_errors})")
-                    
+                if (
+                    "Error parsing chunk" in error_msg
+                    and "Expecting property name enclosed in double quotes" in error_msg
+                ):
+                    logger.warning(
+                        f"Gemini malformed chunk error (attempt {consecutive_errors}/{max_consecutive_errors})"
+                    )
+
                     if consecutive_errors >= max_consecutive_errors:
                         logger.error(f"Too many consecutive API errors ({consecutive_errors}), terminating stream")
                         stream_terminated_early = True
-                        
+
                         # Send error info to client
-                        error_text = f"\n⚠️ Gemini streaming encountered repeated malformed chunks. This is a known API issue.\n"
+                        error_text = (
+                            "\n⚠️ Gemini streaming encountered repeated malformed chunks. This is a known API issue.\n"
+                        )
                         yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': text_block_index, 'delta': {'type': Constants.DELTA_TEXT, 'text': error_text}})}\n\n"
                         break
-                    
+
                     # Brief delay before continuing
                     await asyncio.sleep(0.1)
                     continue
@@ -984,16 +1075,18 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
                     logger.error(f"API error: {api_error}")
                     stream_terminated_early = True
                     break
-                    
+
             except Exception as general_error:
                 consecutive_errors += 1
-                logger.error(f"Unexpected streaming error (attempt {consecutive_errors}/{max_consecutive_errors}): {general_error}")
-                
+                logger.error(
+                    f"Unexpected streaming error (attempt {consecutive_errors}/{max_consecutive_errors}): {general_error}"
+                )
+
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(f"Too many consecutive errors ({consecutive_errors}), terminating stream")
                     stream_terminated_early = True
                     break
-                
+
                 # Brief delay before continuing
                 await asyncio.sleep(0.1)
                 continue
@@ -1005,27 +1098,28 @@ async def handle_streaming_with_recovery(response_generator, original_request: M
     # Always send final SSE events
     try:
         yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': text_block_index})}\n\n"
-        
+
         for tool_data in current_tool_calls.values():
             yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': tool_data['index']})}\n\n"
-        
+
         if stream_terminated_early and final_stop_reason == Constants.STOP_END_TURN:
             final_stop_reason = Constants.STOP_ERROR
 
         final_response = litellm.stream_chunk_builder(all_chunks)
-        if final_response and hasattr(final_response, 'usage'):
+        if final_response and hasattr(final_response, "usage"):
             output_tokens = getattr(final_response.usage, "completion_tokens", 0)
-        
+
         usage_data = {"input_tokens": input_tokens, "output_tokens": output_tokens}
         yield f"event: {Constants.EVENT_MESSAGE_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_DELTA, 'delta': {'stop_reason': final_stop_reason, 'stop_sequence': None}, 'usage': usage_data})}\n\n"
         yield f"event: {Constants.EVENT_MESSAGE_STOP}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_STOP})}\n\n"
-        
+
         # Log final statistics
         if malformed_chunks_count > 0:
             logger.info(f"Stream completed with {malformed_chunks_count} malformed chunks handled")
-            
+
     except Exception as final_error:
         logger.error(f"Error sending final SSE events: {final_error}")
+
 
 # Request Middleware
 @app.middleware("http")
@@ -1036,11 +1130,15 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
+
 # Enhanced streaming retry logic for the main endpoint
 @app.post("/v1/messages")
 async def create_message(request: MessagesRequest, raw_request: Request):
     try:
-        logger.debug(f"📊 Processing request: Original={request.original_model}, Effective={request.model}, Stream={request.stream}")
+        logger.debug(
+            f"📊 Processing request: Original={request.original_model}, Effective={request.model}, Stream={request.stream}"
+        )
+        logger.debug(f"Request headers: {raw_request.headers}")
 
         # Check streaming configuration
         if request.stream and config.emergency_disable_streaming:
@@ -1054,15 +1152,17 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         # Convert request
         litellm_request = convert_anthropic_to_litellm(request)
         litellm_request["api_key"] = config.gemini_api_key
-        
+
         # Log request details
         num_tools = len(request.tools) if request.tools else 0
         log_request_beautifully(
-            "POST", raw_request.url.path,
+            "POST",
+            raw_request.url.path,
             request.original_model or request.model,
-            litellm_request.get('model'),
-            len(litellm_request['messages']),
-            num_tools, 200
+            litellm_request.get("model"),
+            len(litellm_request["messages"]),
+            num_tools,
+            200,
         )
 
         # Enhanced streaming with better retry logic
@@ -1072,27 +1172,26 @@ async def create_message(request: MessagesRequest, raw_request: Request):
             # While tokenizer drift is a concern, this is a practical trade-off for useful logging and cost estimation.
             try:
                 input_tokens = litellm.token_counter(
-                    model=litellm_request["model"],
-                    messages=litellm_request["messages"]
+                    model=litellm_request["model"], messages=litellm_request["messages"]
                 )
             except Exception:
                 input_tokens = 0
 
             streaming_retry_count = 0
             max_retries = config.max_streaming_retries
-            
+
             while streaming_retry_count <= max_retries:
                 try:
                     logger.debug(f"Attempting streaming (attempt {streaming_retry_count + 1}/{max_retries + 1})")
-                    
+
                     # Add slight delay between retries
                     if streaming_retry_count > 0:
-                        delay = min(0.5 * (2 ** streaming_retry_count), 2.0)  # Exponential backoff, max 2s
+                        delay = min(0.5 * (2**streaming_retry_count), 2.0)  # Exponential backoff, max 2s
                         logger.debug(f"Waiting {delay}s before retry...")
                         await asyncio.sleep(delay)
-                    
+
                     response_generator = await litellm.acompletion(**litellm_request)
-                    
+
                     return StreamingResponse(
                         handle_streaming_with_recovery(response_generator, request, input_tokens),
                         media_type="text/event-stream",
@@ -1101,63 +1200,84 @@ async def create_message(request: MessagesRequest, raw_request: Request):
                             "Connection": "keep-alive",
                             "X-Accel-Buffering": "no",
                             "Access-Control-Allow-Origin": "*",
-                            "Access-Control-Allow-Headers": "*"
-                        }
+                            "Access-Control-Allow-Headers": "*",
+                        },
                     )
-                    
-                except (litellm.exceptions.APIConnectionError, RuntimeError) as streaming_error:
+
+                except (
+                    litellm.exceptions.APIConnectionError,
+                    RuntimeError,
+                ) as streaming_error:
                     streaming_retry_count += 1
                     error_msg = str(streaming_error)
-                    
+
                     # Check for the specific malformed chunk error
-                    if ("Error parsing chunk" in error_msg and 
-                        "Expecting property name enclosed in double quotes" in error_msg):
-                        
+                    if (
+                        "Error parsing chunk" in error_msg
+                        and "Expecting property name enclosed in double quotes" in error_msg
+                    ):
                         if streaming_retry_count <= max_retries:
-                            logger.warning(f"Gemini streaming chunk parsing error (attempt {streaming_retry_count}/{max_retries + 1}), retrying...")
+                            logger.warning(
+                                f"Gemini streaming chunk parsing error (attempt {streaming_retry_count}/{max_retries + 1}), retrying..."
+                            )
                             continue
                         else:
-                            logger.error(f"Gemini streaming failed after {max_retries + 1} attempts due to malformed chunks, falling back to non-streaming")
+                            logger.error(
+                                f"Gemini streaming failed after {max_retries + 1} attempts due to malformed chunks, falling back to non-streaming"
+                            )
                             break
                     else:
                         # Other streaming errors - could be connection issues
                         if streaming_retry_count <= max_retries:
-                            logger.warning(f"Streaming error (attempt {streaming_retry_count}/{max_retries + 1}): {error_msg}")
+                            logger.warning(
+                                f"Streaming error (attempt {streaming_retry_count}/{max_retries + 1}): {error_msg}"
+                            )
                             continue
                         else:
-                            logger.error(f"Streaming failed after {max_retries + 1} attempts, falling back to non-streaming")
+                            logger.error(
+                                f"Streaming failed after {max_retries + 1} attempts, falling back to non-streaming"
+                            )
                             break
-                            
+
                 except Exception as unexpected_error:
                     streaming_retry_count += 1
-                    logger.error(f"Unexpected streaming error (attempt {streaming_retry_count}/{max_retries + 1}): {unexpected_error}")
-                    
+                    logger.error(
+                        f"Unexpected streaming error (attempt {streaming_retry_count}/{max_retries + 1}): {unexpected_error}"
+                    )
+
                     if streaming_retry_count <= max_retries:
                         continue
                     else:
-                        logger.error(f"Streaming failed after {max_retries + 1} attempts due to unexpected errors, falling back to non-streaming")
+                        logger.error(
+                            f"Streaming failed after {max_retries + 1} attempts due to unexpected errors, falling back to non-streaming"
+                        )
                         break
-            
+
             # If we get here, streaming failed - fall back to non-streaming
             logger.info("Falling back to non-streaming mode")
             litellm_request["stream"] = False
-        
+
         # Non-streaming path (or fallback)
-        if not request.stream or litellm_request.get("stream") == False:
+        if not request.stream or not litellm_request.get("stream"):
             start_time = time.time()
             litellm_response = await litellm.acompletion(**litellm_request)
-            logger.debug(f"✅ Response received: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
-            
+            logger.debug(
+                f"✅ Response received: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s"
+            )
+
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
             return anthropic_response
 
     except litellm.exceptions.APIError as e:
         logger.error(f"LiteLLM API Error: {e}")
         error_msg = classify_gemini_error(str(e))
-        raise HTTPException(status_code=getattr(e, 'status_code', 500), detail=error_msg)
+        raise HTTPException(status_code=getattr(e, "status_code", 500), detail=error_msg)
     except ConnectionError as e:
         logger.error(f"Connection Error: {e}")
-        raise HTTPException(status_code=503, detail="Connection error. Please check your internet connection.")
+        raise HTTPException(
+            status_code=503,
+            detail="Connection error. Please check your internet connection.",
+        )
     except TimeoutError as e:
         logger.error(f"Timeout Error: {e}")
         raise HTTPException(status_code=504, detail="Request timeout. Please try again.")
@@ -1165,6 +1285,7 @@ async def create_message(request: MessagesRequest, raw_request: Request):
         logger.error(f"Error processing request: {e}")
         error_msg = classify_gemini_error(str(e))
         raise HTTPException(status_code=500, detail=error_msg)
+
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(request: TokenCountRequest, raw_request: Request):
@@ -1177,16 +1298,19 @@ async def count_tokens(request: TokenCountRequest, raw_request: Request):
             system=request.system,
             tools=request.tools,
         )
-        
+
         litellm_data = convert_anthropic_to_litellm(temp_request)
-        
+
         # Log request
         num_tools = len(request.tools) if request.tools else 0
         log_request_beautifully(
-            "POST", raw_request.url.path,
+            "POST",
+            raw_request.url.path,
             request.original_model or request.model,
-            litellm_data.get('model'),
-            len(litellm_data['messages']), num_tools, 200
+            litellm_data.get("model"),
+            len(litellm_data["messages"]),
+            num_tools,
+            200,
         )
 
         # Count tokens
@@ -1194,13 +1318,14 @@ async def count_tokens(request: TokenCountRequest, raw_request: Request):
             model=litellm_data["model"],
             messages=litellm_data["messages"],
         )
-        
+
         return TokenCountResponse(input_tokens=token_count)
 
     except Exception as e:
         logger.error(f"Error counting tokens: {str(e)}")
         error_msg = classify_gemini_error(str(e))
         raise HTTPException(status_code=500, detail=f"Error counting tokens: {error_msg}")
+
 
 @app.get("/health")
 async def health_check():
@@ -1214,12 +1339,12 @@ async def health_check():
             "streaming_config": {
                 "force_disabled": config.force_disable_streaming,
                 "emergency_disabled": config.emergency_disable_streaming,
-                "max_retries": config.max_streaming_retries
-            }
+                "max_retries": config.max_streaming_retries,
+            },
         }
-        
+
         return health_status
-        
+
     except Exception as e:
         logger.error(f"Health check error: {e}")
         return JSONResponse(
@@ -1227,9 +1352,10 @@ async def health_check():
             content={
                 "status": "unhealthy",
                 "timestamp": datetime.now().isoformat(),
-                "error": "Health check failed"
-            }
+                "error": "Health check failed",
+            },
         )
+
 
 @app.get("/test-connection")
 async def test_connection():
@@ -1240,17 +1366,17 @@ async def test_connection():
             model="gemini/gemini-1.5-flash-latest",
             messages=[{"role": "user", "content": "Hello"}],
             max_tokens=5,
-            api_key=config.gemini_api_key
+            api_key=config.gemini_api_key,
         )
-        
+
         return {
             "status": "success",
             "message": "Successfully connected to Gemini API",
             "model_used": "gemini-1.5-flash-latest",
             "timestamp": datetime.now().isoformat(),
-            "response_id": getattr(test_response, 'id', 'unknown')
+            "response_id": getattr(test_response, "id", "unknown"),
         }
-        
+
     except litellm.exceptions.APIError as e:
         logger.error(f"API connectivity test failed: {e}")
         return JSONResponse(
@@ -1263,9 +1389,9 @@ async def test_connection():
                 "suggestions": [
                     "Check your GEMINI_API_KEY is valid",
                     "Verify your API key has the necessary permissions",
-                    "Check if you have reached rate limits"
-                ]
-            }
+                    "Check if you have reached rate limits",
+                ],
+            },
         )
     except Exception as e:
         logger.error(f"Connection test failed: {e}")
@@ -1273,21 +1399,22 @@ async def test_connection():
             status_code=503,
             content={
                 "status": "failed",
-                "error_type": "Connection Error", 
+                "error_type": "Connection Error",
                 "message": classify_gemini_error(str(e)),
                 "timestamp": datetime.now().isoformat(),
                 "suggestions": [
                     "Check your internet connection",
                     "Verify firewall settings allow HTTPS traffic",
-                    "Try again in a few moments"
-                ]
-            }
+                    "Try again in a few moments",
+                ],
+            },
         )
+
 
 @app.get("/")
 async def root():
     return {
-        "message": f"Enhanced Gemini-to-Claude API Proxy v2.5.0",
+        "message": "Enhanced Gemini-to-Claude API Proxy v2.5.0",
         "status": "running",
         "config": {
             "big_model": config.big_model,
@@ -1298,21 +1425,22 @@ async def root():
             "streaming": {
                 "force_disabled": config.force_disable_streaming,
                 "emergency_disabled": config.emergency_disable_streaming,
-                "max_retries": config.max_streaming_retries
-            }
+                "max_retries": config.max_streaming_retries,
+            },
         },
         "endpoints": {
             "messages": "/v1/messages",
-            "count_tokens": "/v1/messages/count_tokens", 
+            "count_tokens": "/v1/messages/count_tokens",
             "health": "/health",
-            "test_connection": "/test-connection"
-        }
+            "test_connection": "/test-connection",
+        },
     }
+
 
 # Simple logging utilities
 class Colors:
     CYAN = "\033[96m"
-    BLUE = "\033[94m" 
+    BLUE = "\033[94m"
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     RED = "\033[91m"
@@ -1320,21 +1448,30 @@ class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
 
-def log_request_beautifully(method: str, path: str, requested_model: str, 
-                           gemini_model_used: str, num_messages: int, 
-                           num_tools: int, status_code: int):
+
+def log_request_beautifully(
+    method: str,
+    path: str,
+    requested_model: str,
+    gemini_model_used: str,
+    num_messages: int,
+    num_tools: int,
+    status_code: int,
+):
     if not sys.stdout.isatty():
-        print(f"{method} {path} - {requested_model} -> {gemini_model_used} ({num_messages} messages, {num_tools} tools)")
+        print(
+            f"{method} {path} - {requested_model} -> {gemini_model_used} ({num_messages} messages, {num_tools} tools)"
+        )
         return
-    
+
     # Colorized logging for TTY
     req_display = f"{Colors.CYAN}{requested_model}{Colors.RESET}"
     gemini_display = f"{Colors.GREEN}{gemini_model_used.replace('gemini/', '')}{Colors.RESET}"
-    
+
     endpoint = path.split("?")[0] if "?" in path else path
     tools_str = f"{Colors.MAGENTA}{num_tools} tools{Colors.RESET}"
     messages_str = f"{Colors.BLUE}{num_messages} messages{Colors.RESET}"
-    
+
     if status_code == 200:
         status_str = f"{Colors.GREEN}✓ {status_code} OK{Colors.RESET}"
     else:
@@ -1347,27 +1484,30 @@ def log_request_beautifully(method: str, path: str, requested_model: str,
     print(model_line)
     sys.stdout.flush()
 
+
 def validate_startup():
     """Validate configuration and connectivity on startup"""
     print("🔍 Validating startup configuration...")
-    
+
     # Check API key
     if not config.gemini_api_key:
         print("🔴 FATAL: GEMINI_API_KEY is not set")
         return False
-    
+
     if not config.validate_api_key():
         print("⚠️ WARNING: API key format validation failed")
-    
+
     # Check network connectivity (basic)
     try:
         import socket
+
         socket.create_connection(("8.8.8.8", 53), timeout=10)
         print("✅ Network connectivity: OK")
     except OSError:
         print("⚠️ WARNING: Network connectivity check failed")
-        
+
     return True
+
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--help":
@@ -1379,17 +1519,17 @@ def main():
         print("  GEMINI_API_KEY - Your Google Gemini API key")
         print("")
         print("Optional environment variables:")
-        print(f"  BIG_MODEL - Big model name (default: gemini-1.5-pro-latest)")
-        print(f"  SMALL_MODEL - Small model name (default: gemini-1.5-flash-latest)")
-        print(f"  HOST - Server host (default: 0.0.0.0)")
-        print(f"  PORT - Server port (default: 8082)")
-        print(f"  LOG_LEVEL - Logging level (default: WARNING)")
-        print(f"  MAX_TOKENS_LIMIT - Token limit (default: 8192)")
-        print(f"  REQUEST_TIMEOUT - Request timeout in seconds (default: 60)")
-        print(f"  MAX_RETRIES - Maximum retries (default: 2)")
-        print(f"  MAX_STREAMING_RETRIES - Maximum streaming retries (default: 2)")
-        print(f"  FORCE_DISABLE_STREAMING - Force disable streaming (default: false)")
-        print(f"  EMERGENCY_DISABLE_STREAMING - Emergency disable streaming (default: false)")
+        print("  BIG_MODEL - Big model name (default: gemini-1.5-pro-latest)")
+        print("  SMALL_MODEL - Small model name (default: gemini-1.5-flash-latest)")
+        print("  HOST - Server host (default: 0.0.0.0)")
+        print("  PORT - Server port (default: 8082)")
+        print("  LOG_LEVEL - Logging level (default: WARNING)")
+        print("  MAX_TOKENS_LIMIT - Token limit (default: 8192)")
+        print("  REQUEST_TIMEOUT - Request timeout in seconds (default: 60)")
+        print("  MAX_RETRIES - Maximum retries (default: 2)")
+        print("  MAX_STREAMING_RETRIES - Maximum streaming retries (default: 2)")
+        print("  FORCE_DISABLE_STREAMING - Force disable streaming (default: false)")
+        print("  EMERGENCY_DISABLE_STREAMING - Emergency disable streaming (default: false)")
         print("")
         print("Available Gemini models:")
         for model in model_manager.gemini_models:
@@ -1403,7 +1543,7 @@ def main():
 
     # Configuration summary
     print("🚀 Enhanced Gemini-to-Claude API Proxy v2.5.0")
-    print(f"✅ Configuration loaded successfully")
+    print("✅ Configuration loaded successfully")
     print(f"   Big Model: {config.big_model}")
     print(f"   Small Model: {config.small_model}")
     print(f"   Available Models: {len(model_manager.gemini_models)}")
@@ -1418,12 +1558,8 @@ def main():
     print("")
 
     # Start server
-    uvicorn.run(
-        app, 
-        host=config.host, 
-        port=config.port, 
-        log_level=config.log_level.lower()
-    )
+    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,57 @@
+[project]
+name = "gemini-for-claude-code"
+version = "2.5.0"
+description = "An Anthropic-compatible proxy server to use Google's Gemini models with the Claude Code CLI."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+  { name = "coffeegrind123", email = "user@example.com" }, # Placeholder email
+]
+keywords = ["gemini", "claude", "proxy", "litellm", "api", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Internet :: Proxy Servers",
+]
+
+# Core application dependencies
+dependencies = [
+    "fastapi[standard]>=0.115.11",
+    "uvicorn>=0.34.0",
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+    "litellm>=1.40.14",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/coffeegrind123/gemini-code"
+"Bug Tracker" = "https://github.com/coffeegrind123/gemini-code/issues"
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "basedpyright"
+]
+
+# Configuration for the 'ruff' linter and formatter
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
